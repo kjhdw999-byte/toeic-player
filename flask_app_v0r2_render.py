@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 
 # 파일명: flask_app_v0r2_render_postgresql.py
-# 버전: v0r2 PostgreSQL (Render 배포용)
+# 버전: v0r2 PostgreSQL (Render 배포용) - undefined 방지
 # 최종 수정: 2026-01-15
-# 변경사항: JSON 파일 → PostgreSQL 마커 저장
+# 변경사항: JSON 파일 → PostgreSQL 마커 저장 + undefined 라벨 방지
 
 from flask import Flask, render_template, request, jsonify, session, redirect
 from werkzeug.utils import secure_filename
@@ -78,7 +78,7 @@ def init_db():
 
 
 def save_markers_to_db(username, audio_path, markers):
-    """마커를 PostgreSQL에 저장 (덮어쓰기)"""
+    """마커를 PostgreSQL에 저장 (덮어쓰기) - undefined 방지 버전"""
     conn = get_db_connection()
     cur = conn.cursor()
 
@@ -92,8 +92,19 @@ def save_markers_to_db(username, audio_path, markers):
         # 2. 새 마커 저장
         for marker in markers:
             if isinstance(marker, dict):
+                # time 필드 추출
                 time_sec = marker.get('time', marker.get('t', 0))
+
+                # label 필드 안전하게 추출 (undefined 방지!)
                 label = marker.get('label', '')
+
+                # undefined, null, None 모두 빈 문자열로 변환
+                if label in ['undefined', 'null', None, 'None']:
+                    label = ''
+
+                # 문자열로 변환 (혹시 모를 타입 문제 방지)
+                label = str(label).strip() if label else ''
+
             else:
                 time_sec = float(marker)
                 label = ''
@@ -101,7 +112,8 @@ def save_markers_to_db(username, audio_path, markers):
             cur.execute("""
                 INSERT INTO markers (username, audio_path, time_sec, label)
                 VALUES (%s, %s, %s, %s)
-                ON CONFLICT (username, audio_path, time_sec) DO NOTHING
+                ON CONFLICT (username, audio_path, time_sec) 
+                DO UPDATE SET label = EXCLUDED.label
             """, (username, audio_path, time_sec, label))
 
         conn.commit()
@@ -117,7 +129,7 @@ def save_markers_to_db(username, audio_path, markers):
 
 
 def load_markers_from_db(username, audio_path):
-    """PostgreSQL에서 마커 불러오기"""
+    """PostgreSQL에서 마커 불러오기 - undefined 방지 버전"""
     conn = get_db_connection()
     cur = conn.cursor()
 
@@ -129,7 +141,17 @@ def load_markers_from_db(username, audio_path):
         """, (username, audio_path))
 
         rows = cur.fetchall()
-        markers = [{'time': row[0], 'label': row[1]} for row in rows]
+
+        markers = []
+        for row in rows:
+            time_sec = row[0]
+            label = row[1] if row[1] else ''
+
+            # 'undefined' 문자열도 빈 문자열로 변환
+            if label in ['undefined', 'null', 'None']:
+                label = ''
+
+            markers.append({'time': time_sec, 'label': label})
 
         print(f"📖 마커 불러오기: {username} - {audio_path} ({len(markers)}개)")
         return markers
@@ -159,6 +181,10 @@ def load_all_users_markers(audio_path):
         # 사용자별로 그룹화
         all_markers = defaultdict(list)
         for username, time_sec, label in rows:
+            # undefined 방지
+            if label in ['undefined', 'null', 'None', None]:
+                label = ''
+
             all_markers[username].append({'time': time_sec, 'label': label})
 
         return dict(all_markers)
@@ -169,6 +195,31 @@ def load_all_users_markers(audio_path):
     finally:
         cur.close()
         conn.close()
+
+
+def cleanup_undefined_labels():
+    """DB에 있는 'undefined' 라벨 청소"""
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute("""
+            UPDATE markers 
+            SET label = '' 
+            WHERE label IN ('undefined', 'null', 'None')
+        """)
+
+        affected = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        if affected > 0:
+            print(f"🧹 청소 완료: {affected}개 라벨 수정")
+        return True
+    except Exception as e:
+        print(f"❌ 청소 실패: {e}")
+        return False
 
 
 # ============= 사용자 관리 (JSON - 간단해서 그대로 유지) =============
@@ -340,8 +391,8 @@ def health():
 
     return jsonify({
         'status': 'OK',
-        'version': 'v0r2-postgresql-render',
-        'features': ['subfolder_support', 'folder_navigation', 'postgresql_markers'],
+        'version': 'v0r2-postgresql-render-fixed',
+        'features': ['subfolder_support', 'folder_navigation', 'postgresql_markers', 'undefined_fix'],
         'database': db_status,
         'folders': len(structure),
         'total_files': total_files,
@@ -353,13 +404,15 @@ def health():
 
 if __name__ == '__main__':
     print("="*60)
-    print(f"🎧 TOEIC LC Player v0r2 PostgreSQL")
+    print(f"🎧 TOEIC LC Player v0r2 PostgreSQL (undefined 방지)")
     print("="*60)
     print(f"서버 시작: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     # DB 초기화
     if init_db():
         print("✅ 데이터베이스 준비 완료")
+        # 기존 undefined 라벨 청소
+        cleanup_undefined_labels()
     else:
         print("⚠️ 데이터베이스 연결 실패 - 환경변수 확인 필요")
 
