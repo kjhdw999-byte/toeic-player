@@ -1,1 +1,1 @@
-# toeic_player
+# toeic-player
